@@ -1,0 +1,985 @@
+---
+title: "Modelowanie i detekcja oszustw finansowych w transakcjach elektronicznych przy użyciu metod uczenia maszynowego"
+author: "Adam Wróbel"
+date: "2025-06-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo=FALSE, warning=F, message=F}
+library(rsample)
+library(caret)
+library(ggplot2)
+library(corrplot)
+library(dplyr)
+library(tidyverse)
+library(reshape2)
+library(infotheo)
+library(DescTools)
+library(tidyr)
+library(knitr)
+library(tidymodels)
+library(themis)
+library(parsnip)
+library(tibble)
+library(purrr)
+library(ranger)        
+library(kernlab)      
+library(lightgbm)      
+library(naivebayes)    
+library(kknn)
+library(discrim)
+library(gt)
+```
+
+# Wybór zbioru danych 
+
+Do projektu wybrano zbiór danych dotyczący wykrywania oszustw finansowych w transakcjach, zawierający informacje o 50 000 unikalnych transakcjach. Dane obejmują różnorodne cechy związane z transakcją, takie jak kwota, typ transakcji, lokalizacja, urządzenie użyte do przeprowadzenia transakcji oraz informacje o użytkowniku, w tym historię poprzednich oszustw i ocenę ryzyka. Zbiór ten zawiera zarówno dane numeryczne, jak i kategoryczne oraz zmienne czasowe, co umożliwia budowę zaawansowanych modeli predykcyjnych do rozróżniania transakcji uczciwych od oszustw.
+
+Źródło danych: Samay Ashar, Fraud Detection Transactions Dataset, Kaggle, https://www.kaggle.com/datasets/samayashar/fraud-detection-transactions-dataset
+
+# Zdefiniowanie problemu
+
+Celem projektu jest zbudowanie modelu predykcyjnego, który będzie skutecznie klasyfikował transakcje finansowe jako oszukańcze (fraud) lub uczciwe (non-fraud) na podstawie dostępnych cech opisujących transakcję oraz użytkownika. Problem ma charakter klasyfikacji binarnej i wiąże się z koniecznością wykrycia rzadkich, ale istotnych przypadków oszustw, które mogą prowadzić do znaczących strat finansowych.
+
+# Charakterystyka zmiennych w zbiorze danych
+
+### 1. Identyfikatory i dane użytkownika
+
+- **Transaction_ID**  
+  Unikalny identyfikator transakcji.
+
+- **User_ID**  
+  Unikalny identyfikator użytkownika dokonującego transakcji.
+
+### 2. Dane dotyczące transakcji
+
+- **Transaction_Amount**  
+  Kwota pieniężna transakcji.
+
+- **Transaction_Type**  
+  Typ transakcji: POS, Bank Transfer, Online, ATM Withdrawal.
+
+- **Timestamp**  
+  Data i godzina wykonania transakcji.
+
+- **Account_Balance**  
+  Saldo konta użytkownika przed transakcją.
+
+- **Transaction_Distance**  
+  Odległość między typową lokalizacją użytkownika a miejscem wykonania transakcji.
+
+- **Is_Weekend**  
+  Wskaźnik informujący, czy transakcja miała miejsce w weekend (0 = nie, 1 = tak).
+
+### 3. Informacje o urządzeniu i lokalizacji
+
+- **Device_Type**  
+  Rodzaj urządzenia, z którego wykonano transakcję (Tablet, Mobile, Desktop).
+
+- **Location**  
+  Geograficzna lokalizacja transakcji.
+
+- **IP_Address_Flag**  
+  Flaga informująca, czy adres IP transakcji jest podejrzany (0 = nie, 1 = tak).
+
+### 4. Dane o sprzedawcy i metodach płatności
+
+- **Merchant_Category**  
+  Kategoria sprzedawcy, Travel, Clothing, Restaurants, Electronics, Groceries.
+
+- **Card_Type**  
+  Typ karty płatniczej użytej do transakcji (Amex, Mastercar, Visa, Discover).
+
+- **Card_Age**  
+  Wiek karty w miesiącach.
+
+- **Authentication_Method**  
+  Metoda uwierzytelnienia użytkownika (Biometric, Password, OTP, PIN).
+
+### 5. Historie i statystyki transakcji użytkownika
+
+- **Previous_Fraudulent_Activity**  
+  Liczba poprzednich oszukańczych aktywności użytkownika.
+
+- **Daily_Transaction_Count**  
+  Liczba transakcji użytkownika dokonanych w danym dniu.
+
+- **Avg_Transaction_Amount_7d**  
+  Średnia kwota transakcji użytkownika z ostatnich 7 dni.
+
+- **Failed_Transaction_Count_7d**  
+  Liczba nieudanych transakcji w ciągu ostatnich 7 dni.
+
+- **Risk_Score**  
+  Obliczony wskaźnik ryzyka dla danej transakcji.
+
+### 6. Zmienna docelowa
+
+- **Fraud_Label**  
+  Zmienna binarna wskazująca, czy transakcja jest oszukańcza:  
+  0 = non-fraud (uczciwa)  
+  1 = fraud (oszukańcza)
+
+```{r, echo=F, message=F}
+dane <- read.csv("fraud_dataset.csv")
+```
+
+# Usunięcie zmiennych i czyszczenie braków
+```{r, echo=F, message=F, results='hide'}
+str(dane)
+dane <- na.omit(dane)
+dane <- dane[,c(-1,-2)]
+sum(dane$Fraud_Label==1)
+sum(dane$Fraud_Label==0)
+```
+Na etapie wstępnej analizy danych zidentyfikowano brakujące wartości w niektórych zmiennych opisujących transakcje. Braki te zostały usunięte w zależności od charakteru zmiennej oraz wpływu na proces modelowania.
+
+Ze zbioru danych usunięto zmienne **Transaction_ID** oraz **User_ID**. Zmienne te pełnią wyłącznie funkcję identyfikacyjną i nie wnoszą wartości informacyjnej do procesu predykcji zmiennej docelowej Fraud_Label. Pozostawienie ich w zbiorze mogłoby prowadzić do przeuczenia modelu lub generowania nieistotnych wzorców, dlatego zostały one wykluczone z dalszej analizy.
+
+```{r, echo=F, results='hide'}
+unique(dane$Authentication_Method)
+unique(dane$Card_Type)
+unique(dane$Merchant_Category)
+unique(dane$Location)
+unique(dane$Device_Type)
+unique(dane$Transaction_Type)
+```
+```{r, echo=F, results='hide'}
+dane$Timestamp <- as.POSIXct(dane$Timestamp, format = "%Y-%m-%d %H:%M:%S")
+
+# Dzień tygodnia (poniedziałek = 1, niedziela = 7)
+dane$DayOfWeek <- as.numeric(format(dane$Timestamp, "%u"))
+
+# Miesiąc (1-12)
+dane$Month <- as.numeric(format(dane$Timestamp, "%m"))
+
+# Godzina (0-23)
+dane$Hour <- as.numeric(format(dane$Timestamp, "%H"))
+
+# Przedziały godzinowe:
+dane$TimeInterval <- cut(dane$Hour,
+                         breaks = c(-1, 6, 12, 18, 24),
+                         labels = c("00:01-06:00", "06:01-12:00", "12:01-18:00", "18:01-00:00"),
+                         right = TRUE)
+dane <- dane[,c(-3,-22)]
+```
+# Przetwarzanie zmiennej czasowej
+
+W celu wzbogacenia zbioru danych o dodatkowe informacje czasowe, dokonano transformacji zmiennej **Timestamp**, zawierającej datę i godzinę wykonania transakcji. Oryginalną zmienną przekształcono do formatu daty i czasu (`POSIXct`), a następnie wyodrębniono z niej następujące cechy:
+
+- **DayOfWeek** – dzień tygodnia wykonania transakcji (wartości od 1 do 7, gdzie 1 oznacza poniedziałek, a 7 niedzielę),
+- **Month** – miesiąc wykonania transakcji (wartości od 1 do 12),
+- **TimeInterval** – przedział godzinowy, w którym dokonano transakcji:
+  - `00:01–06:00` – noc,
+  - `06:01–12:00` – poranek,
+  - `12:01–18:00` – popołudnie,
+  - `18:01–00:00` – wieczór.
+
+Powyższe zmienne zostały dodane do zbioru danych w celu lepszego uchwycenia ewentualnych wzorców czasowych charakterystycznych dla transakcji oszukańczych. Następnie oryginalna zmienna **Timestamp** została usunięta, ponieważ jej szczegółowy format nie był już potrzebny w dalszej analizie.
+
+Dzięki tej transformacji możliwe jest m.in. badanie rozkładu transakcji w poszczególnych porach dnia, dniach tygodnia czy miesiącach, co może mieć istotne znaczenie w procesie wykrywania nadużyć finansowych.
+
+# Sprawdzanie zbalansowania zmiennej Fraud_Label
+```{r, echo=F}
+ggplot(dane, aes(x = as.factor(Fraud_Label), fill = as.factor(Fraud_Label))) +
+  geom_bar() +
+  scale_fill_manual(values = c("0" = "steelblue", "1" = "firebrick")) +
+  labs(title = "Rozkład klas w Fraud_Label",
+       x = "FraudLabel (0 = nie fraud, 1 = fraud)",
+       y = "Liczba przypadków",
+       fill = "FraudLabel") +
+  theme_minimal()
+```
+Analiza zmiennej objaśnianej **Fraud_Label**, która przyjmuje wartości `0` (transakcja nieoszukańcza) oraz `1` (transakcja oszukańcza), wykazała znaczną nierównowagę klas. W zbiorze danych znajduje się:
+
+- **16 067 obserwacji klasy "fraud" (oszustwo)**,
+- **33 933 obserwacje klasy "non-fraud" (brak oszustwa)**.
+
+Oznacza to, że przypadki oszustw stanowią jedynie około **32% wszystkich transakcji**, natomiast transakcje nieoszukańcze dominują w zbiorze, stanowiąc około **68% danych**.
+
+Taka dysproporcja może negatywnie wpłynąć na działanie klasyfikatorów, powodując ich tendencję do preferowania przewidywania klasy większościowej. W związku z tym, na etapie modelowania rozważyłem zastosowanie metod radzenia sobie z niezbalansowanymi danymi, takich jak:
+
+- oversampling klasy mniejszościowej (np. technika SMOTE),
+- undersampling klasy większościowej.
+
+# Transformacja zmiennych kategorycznych
+```{r, echo=F, results='hide'}
+# Wybór kolumn kategorycznych (przykład - dostosuj do rzeczywistych nazw)
+cat_features <- c('Authentication_Method', 'Card_Type', 'Merchant_Category', 'Location', 'Device_Type', 'Transaction_Type', 'DayOfWeek', 'Month', 'TimeInterval', 'Fraud_Label', 'IP_Address_Flag', 'Previous_Fraudulent_Activity', 'Is_Weekend')
+
+# Konwersja na faktor (Label Encoding)
+dane_factor <- dane
+dane_factor[cat_features] <- lapply(dane_factor[cat_features], as.factor)
+
+# Sprawdzenie
+str(dane_factor)
+
+```
+W celu zapewnienia poprawnej interpretacji zmiennych przez modele uczenia maszynowego oraz umożliwienia przeprowadzenia analiz statystycznych, odpowiednie zmienne zostały przekształcone do typu **factor**. Dotyczy to następujących cech:
+
+- **Authentication_Method** – metoda uwierzytelniania (np. PIN, Biometric),
+- **Card_Type** – typ użytej karty płatniczej (np. Credit, Debit, Prepaid),
+- **Merchant_Category** – kategoria sprzedawcy (np. Retail, Food, Travel),
+- **Location** – lokalizacja geograficzna transakcji,
+- **Device_Type** – typ użytego urządzenia (np. Mobile, Desktop),
+- **Transaction_Type** – typ transakcji (np. Online, In-Store, ATM),
+- **DayOfWeek** – dzień tygodnia wykonania transakcji,
+- **Month** – miesiąc wykonania transakcji,
+- **TimeInterval** – przedział godzinowy transakcji,
+- **Fraud_Label** – zmienna objaśniana: etykieta klasyfikująca transakcję jako oszukańczą lub nieoszukańczą (0/1),
+- **IP_Address_Flag** – flaga informująca o podejrzanym adresie IP (0/1),
+- **Previous_Fraudulent_Activity** – liczba wcześniejszych transakcji oszukańczych dla danego użytkownika,
+- **Is_Weekend** – informacja czy transakcja miała miejsce w weekend (0/1).
+
+Przekształcenie tych zmiennych do typu **factor** było niezbędne z kilku powodów:
+
+- poprawne rozpoznanie zmiennych kategorycznych przez algorytmy uczenia maszynowego,
+- umożliwienie prawidłowego zastosowania metod kodowania zmiennych (np. one-hot encoding),
+- zmniejszenie ryzyka błędnej interpretacji zmiennych liczbowych jako ilościowych, co mogłoby prowadzić do niepoprawnych wyników modelowania.
+
+# Sprawdzenie współliniowości zmiennych liczbowych
+```{r, echo=F}
+data_num <- dane %>% select(where(is.numeric))
+data_num <- data_num[,c(-13,-14)]
+cor_matrix <- cor(data_num)
+corrplot(cor_matrix, method = "color", tl.cex = 0.8)
+```
+W celu zbadania współliniowości pomiędzy zmiennymi numerycznymi, obliczono macierz korelacji dla tych zmiennych. Analiza wykazała, że zmienna objaśniana **Fraud_Label** jest najsilniej skorelowana z następującymi zmiennymi:
+
+- **Risk_Score** – współczynnik korelacji wynosi **0.39**,
+- **Failed_Transaction_Count_7d** – współczynnik korelacji wynosi **0.51**.
+
+Otrzymane wartości wskazują na umiarkowaną dodatnią korelację obu zmiennych z cechą objaśnianą. Może to sugerować, że zarówno ocena ryzyka transakcji (**Risk_Score**), jak i liczba nieudanych prób transakcji w ciągu ostatnich 7 dni (**Failed_Transaction_Count_7d**) mogą być istotnymi predyktorami w modelach klasyfikacyjnych służących do wykrywania transakcji oszukańczych.
+
+Pozostałe zmienne numeryczne wykazały niskie wartości korelacji z cechą objaśnianą, co może oznaczać mniejsze znaczenie tych cech przy predykcji oszustw finansowych.
+
+Macierz korelacji nie ujawniła przypadków bardzo wysokiej współliniowości (r > 0.8) pomiędzy zmiennymi niezależnymi, dlatego nie było konieczności usuwania żadnej z cech w celu uniknięcia problemu wielokolinearności.
+
+# Analiza powiązań zmiennych kategorycznych
+```{r, echo=F}
+# Wyciągamy tylko kolumny factor
+factor_vars <- dane_factor[sapply(dane_factor, is.factor)]
+
+n <- ncol(factor_vars)
+cramer_matrix <- matrix(NA, n, n)
+colnames(cramer_matrix) <- colnames(factor_vars)
+rownames(cramer_matrix) <- colnames(factor_vars)
+
+for(i in 1:n) {
+  for(j in i:n) {
+    tbl <- table(factor_vars[[i]], factor_vars[[j]])
+    cramer_matrix[i, j] <- CramerV(tbl)
+    cramer_matrix[j, i] <- cramer_matrix[i, j]  # symetryczna macierz
+  }
+}
+
+cramer_melt <- melt(cramer_matrix)
+
+ggplot(cramer_melt, aes(Var1, Var2, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "white", high = "darkred", mid = "pink",
+                       midpoint = 0.5, limit = c(0,1), space = "Lab",
+                       name="Cramér's V") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
+  coord_fixed()
+
+```
+Dla zmiennych kategorycznych przeprowadzono analizę współzależności z wykorzystaniem miary **Cramér's V**, która pozwala ocenić siłę związku pomiędzy dwiema zmiennymi jakościowymi.
+
+Wyniki analizy wykazały, że nie występują silne zależności między zmiennymi.
+
+Brak silnych związków pomiędzy zmiennymi kategorycznymi pozwala na zachowanie wszystkich tych zmiennych w dalszych etapach modelowania, ponieważ każda z nich może wnosić unikalną wartość informacyjną dla modelu predykcyjnego.
+
+Miara **Cramér's V** została wykorzystana ze względu na jej uniwersalność w ocenie siły powiązań pomiędzy zmiennymi nominalnymi i porządkowymi.
+
+# Wstępna selekcja cech o niskiej zmienności
+```{r, echo=F}
+data_num <- dane_factor %>% select(where(is.numeric))
+data_cat <- dane_factor %>% select(where(is.factor))
+
+var_num <- sapply(data_num, var, na.rm = TRUE)
+low_var_num_cols <- names(var_num[var_num < 1e-5])
+
+prop_cat <- sapply(data_cat, function(x) max(prop.table(table(x))))
+low_var_cat_cols <- names(prop_cat[prop_cat > 0.95])
+
+low_variance_cols <- c(low_var_num_cols, low_var_cat_cols)
+low_variance_cols
+```
+W celu identyfikacji zmiennych o niskiej wartości informacyjnej przeprowadzono analizę zmienności zarówno dla cech liczbowych, jak i kategorycznych:
+
+- Dla zmiennych liczbowych obliczono wariancję. Zmienne o wariancji bliskiej zeru zostałyby uznane za mało informacyjne i potencjalnie usunięte ze zbioru danych.
+- Dla zmiennych kategorycznych sprawdzono częstość występowania poszczególnych kategorii. Zmienna była uznawana za mało zróżnicowaną, jeśli jedna z kategorii stanowiła ponad **95% wszystkich obserwacji**.
+
+W analizowanym zbiorze danych **nie wykryto zmiennych spełniających powyższe kryteria niskiej zmienności**, co oznacza, że wszystkie cechy zachowują potencjalną wartość informacyjną i mogą zostać wykorzystane w dalszym etapie modelowania.
+
+
+# Selekcja cech na podstawie Mutual Information
+```{r, echo=F, warning=F}
+data2 <- data.frame(sapply(dane_factor, as.numeric))
+
+mi_results <- data.frame(
+  Variable = setdiff(names(data2), "Fraud_Label"),
+  Mi_Score = sapply(setdiff(names(data2), "Fraud_Label"), 
+                    function(var) mutinformation(infotheo::discretize(data2[[var]]),
+                                                 infotheo::discretize(data2$Fraud_Label))))
+
+mi_results <- mi_results[order(-mi_results$Mi_Score), ]
+mi_results$Mi_Score <- format(round(mi_results$Mi_Score, 8), scientific = FALSE)
+
+kable(mi_results, caption = "Mutual Information Scores między zmiennymi a Fraud_Label")
+```
+
+
+
+```{r, echo=F, warning=F}
+data2 <- data.frame(sapply(dane_factor, as.numeric))
+
+mi_results <- data.frame(
+  Variable = setdiff(names(data2), "Fraud_Label"),
+  Mi_Score = sapply(setdiff(names(data2), "Fraud_Label"), 
+                    function(var) mutinformation(infotheo::discretize(data2[[var]]),
+                                                 infotheo::discretize(data2$Fraud_Label))))
+
+mi_results <- mi_results[order(-mi_results$Mi_Score), ]
+mi_results$Mi_Score <- format(round(mi_results$Mi_Score, 8), scientific = FALSE)
+
+mi_results$Mi_Score <- as.numeric(mi_results$Mi_Score)
+
+mi_results$Rank <- 1:nrow(mi_results)
+
+# Wykres łokciowy
+ggplot(mi_results, aes(x = Rank, y = Mi_Score)) +
+  geom_point(size = 3, color = "red") +                    # większe kropki
+  geom_line(size = 1.2, color = 'darkblue') +                   # pogrubiona linia
+  scale_x_continuous(breaks = mi_results$Rank) +
+  labs(title = "Wykres łokciowy informacji wzajemnej",
+       x = "Zmienne (posortowane według MI)",
+       y = "Wartość informacji wzajemnej (MI)") +
+  theme_minimal()
+
+```
+## Selekcja cech na podstawie Mutual Information
+
+W celu określenia siły zależności pomiędzy zmiennymi niezależnymi a zmienną objaśnianą **Fraud_Label**, obliczono wskaźniki **Mutual Information (MI)**. MI mierzy ilość informacji, jaką dana zmienna wnosi o zmiennej celu, bez zakładania liniowej zależności, dzięki czemu jest odpowiednia zarówno dla zmiennych liczbowych, jak i kategorycznych.
+
+Wyniki analizy wskazały, że najwyższe wartości MI osiągnęły następujące zmienne:
+
+- **Failed_Transaction_Count_7d** (0.2857),
+- **Risk_Score** (0.1928),
+- **Transaction_Distance**, **Transaction_Amount**, **Card_Age** — o znacznie niższych, lecz zauważalnych wartościach MI.
+
+Dalsze zmienne wykazywały bardzo niskie wartości MI (poniżej 0.00005), co oznacza ich znikomy wpływ na zmienną celu. Na tej podstawie podjęto decyzję o odrzuceniu ostatnich pięciu zmiennych:
+
+- **Transaction_Type**,
+- **IP_Address_Flag**,
+- **Previous_Fraudulent_Activity**,
+- **Is_Weekend**.
+
+Pozostawione zostały zmienne o wyższych wartościach MI (pierwsze 16 zmiennych), gdyż mogą one w istotny sposób wspierać model w klasyfikacji transakcji jako fraud lub non-fraud.
+
+Zastosowanie Mutual Information umożliwiło zredukowanie liczby cech bez utraty istotnej informacji potrzebnej do predykcji oszustw transakcyjnych.
+
+```{r, echo=F}
+selected_vars <- head(mi_results[order(-mi_results$Mi_Score), "Variable"], 16)
+
+dane_factor <- dane_factor[, c(selected_vars, "Fraud_Label")]
+```
+
+```{r, echo=F, results='hide'}
+str(dane_factor)
+```
+# Rozkład zmiennych numerycznych względem Fraud_Labels
+
+```{r, echo=F}
+# Jeśli Fraud_Label jest int lub factor, upewnij się, że to factor:
+dane_factor$Fraud_Label <- as.factor(dane_factor$Fraud_Label)
+
+par(mfrow = c(1, 2))
+
+# Boxplot Failed_Transaction_Count_7d vs Fraud_Label
+boxplot(Failed_Transaction_Count_7d ~ Fraud_Label, data = dane_factor,
+        main = "Failed Transaction Count (7d) by Fraud Label",
+        xlab = "Fraud Label",
+        ylab = "Failed Transaction Count (7 days)",
+        col = c("lightblue", "salmon"))
+
+# Boxplot Risk_Score vs Fraud_Label
+boxplot(Risk_Score ~ Fraud_Label, data = dane_factor,
+        main = "Risk Score by Fraud Label",
+        xlab = "Fraud Label",
+        ylab = "Risk Score",
+        col = c("lightgreen", "orange"))
+
+par(mfrow = c(1, 1))
+```
+```{r, echo=F}
+# Upewnij się, że Fraud_Label jest faktorem
+dane_factor$Fraud_Label <- as.factor(dane_factor$Fraud_Label)
+
+par(mfrow = c(1, 2))  # ustawiamy 1 wiersz, 2 kolumny wykresów
+
+# Boxplot Transaction_Distance względem Fraud_Label
+boxplot(Transaction_Distance ~ Fraud_Label, data = dane_factor,
+        main = "Transaction Distance by Fraud Label",
+        xlab = "Fraud Label",
+        ylab = "Transaction Distance",
+        col = c("lightblue", "salmon"))
+
+# Boxplot Transaction_Amount względem Fraud_Label
+boxplot(Transaction_Amount ~ Fraud_Label, data = dane_factor,
+        main = "Transaction Amount by Fraud Label",
+        xlab = "Fraud Label",
+        ylab = "Transaction Amount",
+        col = c("lightgreen", "orange"))
+
+par(mfrow = c(1, 1))
+```
+
+```{r, echo=F}
+dane_factor$Fraud_Label <- as.factor(dane_factor$Fraud_Label)
+
+par(mfrow = c(1, 2))  # ustawiamy 1 wiersz, 2 kolumny wykresów
+
+boxplot(Card_Age ~ Fraud_Label, data = dane_factor,
+        main = "Card Age by Fraud Label",
+        xlab = "Fraud Label",
+        ylab = "Card Age (days)",
+        col = c("lightblue", "salmon"))
+
+boxplot(Avg_Transaction_Amount_7d ~ Fraud_Label, data = dane_factor,
+        main = "Average Transaction Amount (7 days) by Fraud Label",
+        xlab = "Fraud Label",
+        ylab = "Avg Transaction Amount (7d)",
+        col = c("lightgreen", "orange"))
+
+par(mfrow = c(1, 1))
+
+```
+```{r, echo=F}
+dane_factor$Fraud_Label <- as.factor(dane_factor$Fraud_Label)
+
+par(mfrow = c(1, 2))  # ustawiamy 1 wiersz, 2 kolumny wykresów
+
+boxplot(Account_Balance ~ Fraud_Label, data = dane_factor,
+        main = "Account Balance by Fraud Label",
+        xlab = "Fraud Label",
+        ylab = "Account Balance",
+        col = c("lightblue", "salmon"))
+
+boxplot(Daily_Transaction_Count ~ Fraud_Label, data = dane_factor,
+        main = "Daily Transaction Count by Fraud Label",
+        xlab = "Fraud Label",
+        ylab = "Daily Transaction Count",
+        col = c("lightgreen", "orange"))
+
+par(mfrow = c(1, 1))  # resetujemy układ do domyślnego (jeden wykres na okno)
+
+```
+Na podstawie wykresów pudełkowych przeanalizowano różnice w rozkładzie kilku kluczowych zmiennych numerycznych w grupach.
+
+- **Failed Transaction Count (7d)**: Widać wyraźnie, że dla transakcji oznaczonych jako fraud liczba nieudanych transakcji w ciągu ostatnich 7 dni jest zazwyczaj wyższa, co może sugerować zwiększone ryzyko oszustwa powiązane z częstszymi niepowodzeniami.
+  
+- **Risk Score**: Również tutaj różnica jest znacząca — transakcje fraudowe mają zdecydowanie wyższe oceny ryzyka, co potwierdza sensowność tego wskaźnika jako predyktora oszustw.
+
+Natomiast dla pozostałych analizowanych zmiennych:
+
+- **Transaction Distance**
+- **Transaction Amount**
+- **Card Age**
+- **Average Transaction Amount (7 days)**
+- **Account Balance**
+- **Daily Transaction Count**
+
+nie zaobserwowano istotnych różnic w rozkładach między transakcjami fraudowymi a nie-fraudowymi. Oznacza to, że te zmienne mogą mieć ograniczone znaczenie w rozróżnianiu przypadków oszustw w tym zbiorze danych.
+
+# Rozkład zmiennych kategorycznych względem Fraud_Labels
+```{r, echo=F}
+cat_vars <- c("DayOfWeek", "Month")
+
+df_long <- dane_factor %>%
+  select(all_of(cat_vars), Fraud_Label) %>%
+  pivot_longer(cols = all_of(cat_vars), names_to = "Variable", values_to = "Value")
+
+ggplot(df_long, aes(x = Value, fill = Fraud_Label)) +
+  geom_bar(position = "dodge") +
+  facet_wrap(~ Variable, scales = "free_x") +
+  labs(title = "Rozkłady DayOfWeek i Month względem Fraud_Label") +
+  scale_fill_manual(values = c("lightblue", "salmon"), name = "Fraud Label") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+```{r, echo=F}
+cat_vars <- c("TimeInterval", "Authentication_Method")
+
+df_long <- dane_factor %>%
+  select(all_of(cat_vars), Fraud_Label) %>%
+  pivot_longer(cols = all_of(cat_vars), names_to = "Variable", values_to = "Value")
+
+ggplot(df_long, aes(x = Value, fill = Fraud_Label)) +
+  geom_bar(position = "dodge") +
+  facet_wrap(~ Variable, scales = "free_x") +
+  labs(title = "Rozkłady TimeInterval i Authentication_Method względem Fraud_Label") +
+  scale_fill_manual(values = c("lightblue", "salmon"), name = "Fraud Label") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+```{r, echo=F}
+cat_vars <- c("Location", "Merchant_Category")
+
+df_long <- dane_factor %>%
+  select(all_of(cat_vars), Fraud_Label) %>%
+  pivot_longer(cols = all_of(cat_vars), names_to = "Variable", values_to = "Value")
+
+ggplot(df_long, aes(x = Value, fill = Fraud_Label)) +
+  geom_bar(position = "dodge") +
+  facet_wrap(~ Variable, scales = "free_x") +
+  labs(title = "Rozkłady Location i Merchant_Category względem Fraud_Label") +
+  scale_fill_manual(values = c("lightblue", "salmon"), name = "Fraud Label") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+```{r, echo=F}
+cat_vars <- c("Device_Type", "Card_Type")
+
+df_long <- dane_factor %>%
+  select(all_of(cat_vars), Fraud_Label) %>%
+  pivot_longer(cols = all_of(cat_vars), names_to = "Variable", values_to = "Value")
+
+ggplot(df_long, aes(x = Value, fill = Fraud_Label)) +
+  geom_bar(position = "dodge") +
+  facet_wrap(~ Variable, scales = "free_x") +
+  labs(title = "Rozkłady Device_Type i Card_Type względem Fraud_Label") +
+  scale_fill_manual(values = c("lightblue", "salmon"), name = "Fraud Label") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+Na podstawie wykresów słupkowych przeanalizowano różnice w rozkładzie kilku kluczowych zmiennych kategorycznych w grupach.
+
+- **TimeInterval**: Widać wyraźnie, że dla transakcji oznaczonych jako fraud liczba transakcji w ciągu doby zmniejsza się. Jest zazwyczaj wyższa rano, co może sugerować zwiększone ryzyko oszustwa w godzinach między północą a porankiem (6:00).
+  
+Natomiast dla pozostałych analizowanych zmiennych:
+
+- **DayOfWeek**
+- **Month**
+- **Authentication_Method**
+- **Location**
+- **Merchant_Category**
+- **Device_Type**
+- **Card_Type**
+- **Risk Score**
+
+nie zaobserwowano istotnych różnic w rozkładach między transakcjami fraudowymi a nie-fraudowymi. Oznacza to, że te zmienne mogą mieć ograniczone znaczenie w rozróżnianiu przypadków oszustw w tym zbiorze danych.
+
+# Podział zmiennych na zbiory treningowe i testowe
+```{r, echo=FALSE}
+set.seed(2024)
+
+split <- initial_split(dane_factor, prop = 0.8, strata = Fraud_Label)
+
+Train_factor <- training(split)
+Test_factor <- testing(split)
+```
+
+Zbiór danych jest niezbalansowany klasowo, dlatego w celu zachowania rozkładu klas w zbiorach treningowym i testowym zastosowano losowanie warstwowe z użyciem parametru strata.
+Zbiór danych został podzielony w stosunku 0.8 dla zbioru treningowego i 0.2 dla zbioru testowego.
+
+# Oversampling
+```{r, echo=F}
+recipe_smote <- recipe(Fraud_Label ~ ., data = Train_factor) %>%
+  step_unknown(all_nominal_predictors(), -all_outcomes()) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_dummy(all_nominal_predictors(), -all_outcomes()) %>%
+  step_smote(Fraud_Label, over_ratio = 1)
+
+prep_recipe_smote <- prep(recipe_smote)
+
+Train_Smote <- bake(prep_recipe_smote, new_data = NULL)
+Test_Smote <- bake(prep_recipe_smote, new_data = Test_factor)
+```
+
+W celu wstępnej oceny skuteczności modeli klasyfikacyjnych zastosowano losowo wybraną metodę oversamplingu — SMOTE — w celu zredukowania problemu niezrównoważonych klas. Na tym etapie nie skupiono się na optymalnym doborze techniki balansowania, a jedynie na zapewnieniu porównywalnych warunków dla wszystkich modeli. Szczegółowa analiza i wybór najbardziej efektywnej metody balansowania zostaną przeprowadzone w kolejnych etapach projektu.
+
+```{r, echo=F}
+ggplot(Train_Smote, aes(x = as.factor(Fraud_Label), fill = as.factor(Fraud_Label))) +
+  geom_bar() +
+  scale_fill_manual(values = c("0" = "steelblue", "1" = "firebrick")) +
+  labs(title = "Rozkład klas w Fraud_Label",
+       x = "FraudLabel (0 = nie fraud, 1 = fraud)",
+       y = "Liczba przypadków",
+       fill = "FraudLabel") +
+  theme_minimal()
+```
+Zbiór treningowy po oversamplingu zawiera zrównoważoną liczbę obserwacji w obu klasach.
+
+# Porównanie modeli klasyfikacyjnych
+
+```{r, echo=F}
+# Logistyczna regresja
+log_model <- logistic_reg() %>%
+  set_engine("glm") %>%
+  set_mode("classification")
+
+# Random Forest
+rf_model <- rand_forest() %>%
+  set_engine("ranger") %>%
+  set_mode("classification")
+
+# SVM z RBF kernel
+svm_model <- svm_rbf() %>%
+  set_engine("kernlab") %>%
+  set_mode("classification")
+
+# XGBoost
+#xgb_model <- boost_tree() %>%
+#  set_engine("xgboost") %>%
+#  set_mode("classification")
+
+# Naive Bayes
+nb_model <- naive_Bayes() %>%
+  set_engine("naivebayes") %>%
+  set_mode("classification")
+
+# LightGBM (wymaga pakietu lightgbm z bindingiem do R)
+#lgb_model <- boost_tree() %>%
+#  set_engine("lightgbm") %>%
+#  set_mode("classification")
+
+# K-Nearest Neighbors
+knn_model <- nearest_neighbor() %>%
+  set_engine("kknn") %>%
+  set_mode("classification")
+
+```
+
+Zdefiniowano 7 modeli klasyfikacyjnych:
+
+- **Logistyczna regresja**
+
+- **Random Forest**
+
+- **Support Vector Machine z kernel RBF**
+
+- **Naive Bayes**
+
+- **K-Nearest Neighbors**
+
+Zanim przystąpiono do oceny skuteczności modeli, dostosowano metryki oceny tak, aby były liczone względem klasy pozytywnej (wartości 1, oznaczającej fraud) Domyślnie metryki w pakiecie yardstick odnoszą się do klasy 0, jednak w kontekście wykrywania oszustw kluczowe jest skupienie się na skuteczności wykrywania przypadków oszustwa, a nie normalnych transakcji.
+```{r, echo=F}
+recall <- yardstick::metric_tweak("recall", yardstick::recall, event_level = "second")
+f_meas <- yardstick::metric_tweak("f_meas", yardstick::f_meas, event_level = "second")
+precision <- yardstick::metric_tweak("precision", yardstick::precision, event_level = "second")
+```
+
+```{r, echo=F}
+evaluate_model <- function(model_spec, method_name) {
+
+  fit_mod <- fit(model_spec, formula = Fraud_Label ~ ., data = Train_Smote)
+
+  Train_Preds <- predict(fit_mod, new_data = Train_Smote, type = "class") %>%
+    bind_cols(Train_Smote %>% select(Fraud_Label))
+
+  Test_Preds <- predict(fit_mod, new_data = Test_Smote, type = "class") %>%
+    bind_cols(Test_Smote %>% select(Fraud_Label))
+
+  metric_set_custom <- metric_set(recall, f_meas, precision, accuracy)
+  
+  Train_Metrics <- metric_set_custom(Train_Preds, truth = Fraud_Label, estimate = .pred_class)
+  Test_Metrics <- metric_set_custom(Test_Preds, truth = Fraud_Label, estimate = .pred_class)
+  
+  results <- tibble(
+    Model = method_name,
+    Recall_Train = Train_Metrics %>% filter(.metric == "recall") %>% pull(.estimate),
+    F1_Score_Train = Train_Metrics %>% filter(.metric == "f_meas") %>% pull(.estimate),
+    Precision_Train = Train_Metrics %>% filter(.metric == "precision") %>% pull(.estimate),
+    Accuracy_Train = Train_Metrics %>% filter(.metric == "accuracy") %>% pull(.estimate),
+    Recall_Test = Test_Metrics %>% filter(.metric == "recall") %>% pull(.estimate),
+    F1_Score_Test = Test_Metrics %>% filter(.metric == "f_meas") %>% pull(.estimate),
+    Precision_Test = Test_Metrics %>% filter(.metric == "precision") %>% pull(.estimate),
+    Accuracy_Test = Test_Metrics %>% filter(.metric == "accuracy") %>% pull(.estimate)
+  ) %>%
+    mutate(across(where(is.numeric), ~ round(.x, 2)))
+
+  return(results)
+}
+
+```
+
+
+```{r, echo=F, warning=F, results='hide'}
+# Lista modeli i ich nazw
+models_list <- list(
+  log_model = log_model,
+  rf_model = rf_model,
+  svm_model = svm_model,
+  nb_model = nb_model,
+  knn_model = knn_model
+)
+
+# Wywołanie evaluate_model dla każdego modelu i połączenie wyników w jeden data frame
+results_table <- purrr::map2_dfr(
+  models_list,
+  names(models_list),
+  ~ evaluate_model(.x, .y)
+)
+
+# Wyświetlenie tabeli wyników
+print(results_table)
+
+```
+# Porównanie modeli klasyfikacyjnych
+```{r, echo=F}
+results_table %>%
+  gt() %>%
+  tab_header(
+    title = "Porównanie modeli klasyfikacyjnych",
+    subtitle = "Metryki dla zbioru treningowego i testowego"
+  ) %>%
+  fmt_number(
+    columns = where(is.numeric),
+    decimals = 2
+  ) %>%
+  cols_label(
+    Model = "Model",
+    Recall_Train = "Recall (Train)",
+    F1_Score_Train = "F1 Score (Train)",
+    Precision_Train = "Precision (Train)",
+    Accuracy_Train = "Accuracy (Train)",
+    Recall_Test = "Recall (Test)",
+    F1_Score_Test = "F1 Score (Test)",
+    Precision_Test = "Precision (Test)",
+    Accuracy_Test = "Accuracy (Test)"
+  ) %>%
+  tab_style(
+    style = list(cell_text(weight = "bold")),
+    locations = cells_column_labels(everything())
+  ) %>%
+  tab_options(
+    table.font.size = 12,
+    heading.title.font.size = 14,
+    heading.subtitle.font.size = 12
+  )
+
+```
+W celu predykcji zmiennej **Fraud_Label** zastosowano pięć modeli klasyfikacyjnych: regresję logistyczną (Logistic Regression), las losowy (Random Forest), maszynę wektorów nośnych (SVM), naiwny klasyfikator Bayesa (Naive Bayes) oraz k-najbliższych sąsiadów (k-NN). Ocenę jakości modeli przeprowadzono na podstawie metryk: **Recall**, **F1 Score**, **Precision** oraz **Accuracy** dla zbioru treningowego i testowego.
+
+## Interpretacja wyników
+
+- **Random Forest**:
+  - Model idealnie dopasował się do zbioru treningowego i testowego, osiągając perfekcyjne wyniki na wszystkich metrykach (**1.00**). 
+  - Może jednak występować **overfitting**, lecz w tym przypadku testowe metryki również są doskonałe, co świadczy o bardzo dobrej generalizacji modelu.
+
+- **SVM**:
+  - Również osiągnął bardzo wysokie wyniki, jednak F1 Score i Precision na zbiorze testowym są minimalnie niższe niż w Random Forest.
+  - Model ten wykazuje lekką tendencję do **niedopasowania** w porównaniu do Random Forest.
+
+- **Logistic Regression**:
+  - Osiągnęła dobre, ale niższe wyniki niż powyższe modele.
+  - Może być dobrym wyborem w przypadku potrzeby prostoty i interpretowalności modelu.
+
+- **Naive Bayes**:
+  - Wysoki Recall, lecz niskie Precision i F1 Score na zbiorze testowym wskazują na **dużą liczbę fałszywych alarmów**.
+  - Model nie radzi sobie najlepiej w predykcji fraudów mimo prostoty.
+
+- **k-NN**:
+  - Bardzo wysokie wyniki na zbiorze treningowym (przeuczenie), ale słabe na zbiorze testowym – klasyczny przypadek **overfittingu**.
+
+## Wybór najlepszego modelu
+
+Na podstawie uzyskanych wyników **Random Forest** jest zdecydowanie najlepszym modelem w tym zadaniu:
+
+- Najwyższe wartości wszystkich metryk zarówno na zbiorze treningowym, jak i testowym.
+- Brak oznak przeuczenia lub niedouczenia.
+- Dodatkowym atutem modelu lasu losowego jest odporność na outliery oraz możliwość wyjaśniania ważności zmiennych.
+
+Z tego względu, w dalszej analizie i budowie systemu predykcji fraudów rekomenduje się wykorzystanie właśnie tego modelu.
+
+```{r,echo=F, results='hide'}
+rf_wf <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(recipe_smote)   # lub recipe_none / over / under itp.
+
+rf_fit <- fit(rf_wf, data = Train_factor)
+
+rf_preds <- predict(rf_fit, new_data = Test_factor, type = "class") %>%
+  bind_cols(Test_factor %>% select(Fraud_Label))
+
+conf_mat(data = rf_preds, truth = Fraud_Label, estimate = .pred_class)
+```
+```{r, echo=F}
+conf_mat(data = rf_preds, truth = Fraud_Label, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  ggtitle("Random Forest - Macierz Pomyłek") +
+  theme_minimal() +
+  scale_fill_gradient(low = "white", high = "red") 
+
+```
+### Wnioski z macierzy pomyłek
+
+- **True Negatives (TN = 6787)**: Model idealnie rozróżnia przypadki, w których nie zachodzi kradzież środków – poprawnie sklasyfikowano wszystkie transakcje.
+
+- **False Positives (FP = 0)**: Model się nie myli.
+
+- **False Negatives (FN = 0)**: Model się nie myli.
+
+- **True Positives (TP = 3214)**: Model idealnie rozpoznaje przypadki, w których zachodzi kradzież środków – poprawnie sklasyfikowano wszystkie oszustwa.
+
+# Porównanie metod balansowania dla Random Forest
+
+```{r, echo=F}
+# 1. Bez balansowania
+recipe_none <- recipe(Fraud_Label ~ ., data = Train_factor) %>%
+  step_unknown(all_nominal_predictors(), -all_outcomes()) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_dummy(all_nominal_predictors(), -all_outcomes())
+
+# 2. SMOTE
+recipe_smote <- recipe_none %>%
+  step_smote(Fraud_Label)
+
+# 3. Random OverSampling
+recipe_over <- recipe_none %>%
+  step_upsample(Fraud_Label)
+
+# 4. Random UnderSampling
+recipe_under <- recipe_none %>%
+  step_downsample(Fraud_Label)
+```
+
+```{r, echo=F}
+evaluate_rf <- function(recipe_obj, method_name) {
+  wf <- workflow() %>%
+    add_model(rf_model) %>%
+    add_recipe(recipe_obj)
+  
+  fit_mod <- fit(wf, data = Train_factor)
+  
+  Train_Preds <- predict(fit_mod, new_data = Train_factor, type = "class") %>%
+    bind_cols(Train_factor %>% select(Fraud_Label))
+  
+  Test_Preds <- predict(fit_mod, new_data = Train_factor, type = "class") %>%
+    bind_cols(Train_factor %>% select(Fraud_Label))
+  
+  metric_set_custom <- metric_set(recall, f_meas, precision, accuracy)
+  
+  Train_Metrics <- metric_set_custom(Train_Preds, truth = Fraud_Label, estimate = .pred_class)
+  Test_Metrics <- metric_set_custom(Test_Preds, truth = Fraud_Label, estimate = .pred_class)
+  
+  tibble(
+    Method = method_name,
+    Recall_Train = Train_Metrics %>% filter(.metric == "recall") %>% pull(.estimate),
+    F1_Score_Train = Train_Metrics %>% filter(.metric == "f_meas") %>% pull(.estimate),
+    Precision_Train = Train_Metrics %>% filter(.metric == "precision") %>% pull(.estimate),
+    Accuracy_Train = Train_Metrics %>% filter(.metric == "accuracy") %>% pull(.estimate),
+    Recall_Test = Test_Metrics %>% filter(.metric == "recall") %>% pull(.estimate),
+    F1_Score_Test = Test_Metrics %>% filter(.metric == "f_meas") %>% pull(.estimate),
+    Precision_Test = Test_Metrics %>% filter(.metric == "precision") %>% pull(.estimate),
+    Accuracy_Test = Test_Metrics %>% filter(.metric == "accuracy") %>% pull(.estimate)
+  ) %>%
+    mutate(across(where(is.numeric), ~ round(.x, 2)))
+}
+
+```
+
+```{r, echo=F}
+rf_results <- list(
+  "Brak balansowania" = recipe_none,
+  "SMOTE" = recipe_smote,
+  "OverSampling" = recipe_over,
+  "UnderSampling" = recipe_under
+)
+
+rf_results_table <- map2_dfr(
+  rf_results,
+  names(rf_results),
+  ~ evaluate_rf(.x, .y)
+)
+
+rf_results_table %>% 
+  gt() %>%
+  tab_header(
+    title = "Random Forest: Porównanie metod balansowania",
+    subtitle = "Trening i test – metryki klasyfikacji"
+  ) %>%
+  fmt_number(columns = where(is.numeric), decimals = 2)
+
+```
+
+W celu zbadania wpływu różnych metod balansowania zbioru danych na jakość klasyfikacji przeprowadzono trening modelu **Random Forest** przy zastosowaniu następujących podejść:
+
+1. **Brak balansowania (Baseline)**  
+2. **SMOTE (Synthetic Minority Over-sampling Technique)**  
+3. **Random OverSampling (losowe nadpróbkowanie klasy mniejszościowej)**  
+4. **Random UnderSampling (losowe usunięcie próbek z klasy większościowej)**  
+
+### Opis metod balansowania
+
+- **Brak balansowania**:  
+  Dane treningowe wykorzystano w oryginalnej, niezbalansowanej postaci. Model Random Forest potrafi radzić sobie z lekką niezbalansowanością dzięki losowemu doborowi próbek i podziałów w drzewach.
+
+- **SMOTE (Synthetic Minority Over-sampling Technique)**:  
+  Technika syntetycznego generowania nowych przykładów klasy mniejszościowej poprzez interpolację istniejących przypadków. Celem jest zredukowanie problemu niezbalansowania bez utraty informacji.
+
+- **Random OverSampling**:  
+  Proste losowe powielanie istniejących próbek klasy mniejszościowej aż do wyrównania liczby przypadków obu klas.
+
+- **Random UnderSampling**:  
+  Losowe usunięcie obserwacji z klasy większościowej, aby dopasować liczebność do klasy mniejszościowej. Może prowadzić do utraty informacji z danych.
+
+### Analiza wyników
+
+Niezależnie od zastosowanej metody balansowania model Random Forest osiągnął **identyczne, perfekcyjne wyniki (Recall = Precision = F1 = Accuracy = 1.00)** zarówno na zbiorze treningowym, jak i testowym.
+
+### Możliwe przyczyny takiego rezultatu:
+
+1. **Wyjątkowa moc modelu Random Forest**:
+   - Model ten jest bardzo odporny na niezbalansowane zbiory dzięki budowie wielu drzew decyzyjnych na losowych próbkach.
+   
+2. **Charakterystyka danych**:
+   - Zmienna objaśniana jest dość dobrze rozróżnialna na podstawie dostępnych zmiennych predykcyjnych (np. `Risk_Score`, `Failed_Transaction_Count_7d`), co ułatwia klasyfikację niezależnie od balansu danych.
+
+3. **Mały stopień niezbalansowania zbioru**:
+   - Stosunek klas (ok. 1:2) nie jest bardzo skrajny — model mógł poradzić sobie z oryginalną dystrybucją bez potrzeby korekty.
+
+4. **Potencjalny overfitting (przeuczenie)**:
+   - Idealne wyniki mogą świadczyć o nadmiernym dopasowaniu modelu do danych treningowych i testowych — może to wynikać z małego zbioru danych lub podobnej struktury zbioru testowego i treningowego.
+   
+# Podsumowanie i wnioski końcowe
+
+Celem projektu była budowa modelu klasyfikacyjnego wykrywającego transakcje oszukańcze (fraudy) na podstawie dostępnych danych transakcyjnych. Przeprowadzono następujące etapy:
+
+1. **Przygotowanie i oczyszczenie danych**:
+   - Usunięto zmienne identyfikacyjne (`Transaction_ID`, `User_ID`) ze względu na brak wartości predykcyjnej.
+   - Uzupełniono brakujące dane oraz usunięto obserwacje zawierające braki.
+   - Zmienną czasową `Timestamp` przekształcono w zmienne opisujące dzień tygodnia, miesiąc, godzinę oraz przedział godzinowy.
+   - Przekształcono zmienne kategoryczne do typu `factor`, aby poprawnie wykorzystać je w analizach i modelach.
+
+2. **Analiza eksploracyjna danych (EDA)**:
+   - Zbadano strukturę danych, rozkład klas zmiennej objaśnianej oraz współliniowość zmiennych liczbowych (korelacja) i kategorycznych (miara Cramera V).
+   - Przeprowadzono selekcję cech o niskiej zmienności — nie wykryto cech niespełniających kryteriów zmienności.
+   - Na podstawie analizy wzajemnej informacji (Mutual Information) wybrano 16 najbardziej istotnych zmiennych, odrzucając cechy o bardzo niskiej wartości informacyjnej.
+
+3. **Budowa i ocena modeli klasyfikacyjnych**:
+   - Zbudowano i oceniono modele: **Logistic Regression**, **Random Forest**, **Support Vector Machine**, **Naive Bayes**, **k-Nearest Neighbors**.
+   - Najlepszy wynik osiągnął model **Random Forest**, który uzyskał perfekcyjne wyniki (100%) na zbiorze testowym i treningowym. Inne modele uzyskały gorsze metryki, zwłaszcza pod względem precyzji i F1-score.
+   
+4. **Porównanie metod balansowania danych**:
+   - Porównano różne metody balansowania zbioru treningowego (SMOTE, oversampling, undersampling, brak balansowania).
+   - W każdym przypadku model Random Forest uzyskał identycznie wysokie wyniki, co potwierdza odporność tego algorytmu na niezbalansowane klasy w analizowanym zbiorze.
+
+---
+
+### Wnioski końcowe:
+
+- **Random Forest** okazał się najskuteczniejszym algorytmem w wykrywaniu transakcji oszukańczych w analizowanym zbiorze danych. Model ten zapewniał najwyższą wartość recall, precision, F1-score i accuracy zarówno w zbiorze treningowym, jak i testowym.
+  
+- **Balansowanie zbioru danych nie wpłynęło znacząco na jakość modelu Random Forest**, co może wynikać z niewielkiego stopnia niezbalansowania danych oraz dużej mocy predykcyjnej wybranych zmiennych.
+
+- Najważniejsze zmienne wpływające na wykrywanie fraudów to: **Failed_Transaction_Count_7d** oraz **Risk_Score**, co potwierdzono zarówno analizą rozkładów tych cech względem Fraud_Label, jak i wynikami Mutual Information.
+
+- Przeprowadzona analiza potwierdza, że dobrze dobrane cechy oraz zastosowanie modelu Random Forest umożliwia skuteczne wykrywanie oszustw finansowych w transakcjach elektronicznych.
+
